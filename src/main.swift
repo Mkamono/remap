@@ -128,17 +128,48 @@ final class MouseEngine {
             // 物理マウスを動かしても内部 cursor が古い位置のままになるのを防ぐため、
             // dx/dy 加算の前に実際の現在位置で cursor を同期する。
             cursor = CGEvent(source: nil)?.location ?? cursor
-            cursor.x += dx
-            cursor.y += dy
-            // スクリーン境界クランプ: メイン画面の範囲内に収める。
-            // CGDisplayBounds はメイン画面の原点・サイズを返す (Retina スケール非依存)。
-            let bounds = CGDisplayBounds(CGMainDisplayID())
-            cursor.x = min(max(cursor.x, bounds.minX), bounds.maxX - 1)
-            cursor.y = min(max(cursor.y, bounds.minY), bounds.maxY - 1)
+            let target = CGPoint(x: cursor.x + dx, y: cursor.y + dy)
+            // スクリーン境界クランプ: 全アクティブディスプレイの範囲内に収める。
+            // メイン画面だけにクランプすると複数ディスプレイの境界を越えられないため、
+            // どれかのディスプレイ内なら越境を許可する。
+            cursor = MouseEngine.clampToDisplays(target: target, from: cursor)
             let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
                                mouseCursorPosition: cursor, mouseButton: .left)
             move?.post(tap: .cghidEventTap)
         }
+    }
+
+    // 全アクティブディスプレイの矩形を返す（グローバル座標, Retina スケール非依存）。
+    private static func activeDisplayBounds() -> [CGRect] {
+        var count: UInt32 = 0
+        CGGetActiveDisplayList(0, nil, &count)
+        guard count > 0 else { return [] }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetActiveDisplayList(count, &ids, &count)
+        return ids.prefix(Int(count)).map { CGDisplayBounds($0) }
+    }
+
+    private static func contains(_ rects: [CGRect], _ p: CGPoint) -> Bool {
+        // CGDisplayBounds は上端含む/下端含まずの半開区間。隣接ディスプレイが
+        // 連続するよう maxX/maxY を排他に扱う。
+        for r in rects where p.x >= r.minX && p.x < r.maxX && p.y >= r.minY && p.y < r.maxY {
+            return true
+        }
+        return false
+    }
+
+    // target がいずれかのディスプレイ内ならそのまま、そうでなければ軸ごとに
+    // 分けて越境可能な成分だけ採用する（斜め移動でディスプレイ間の隙間に
+    // 入り込むのを防ぐ）。どの軸も無効なら現在位置に留める。
+    private static func clampToDisplays(target: CGPoint, from current: CGPoint) -> CGPoint {
+        let rects = activeDisplayBounds()
+        if rects.isEmpty { return target }
+        if contains(rects, target) { return target }
+        let slideX = CGPoint(x: target.x, y: current.y)
+        if contains(rects, slideX) { return slideX }
+        let slideY = CGPoint(x: current.x, y: target.y)
+        if contains(rects, slideY) { return slideY }
+        return current
     }
 
     // -- 外部API (EventHandler から呼ばれる) ---------------------------
