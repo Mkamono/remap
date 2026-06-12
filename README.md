@@ -25,7 +25,8 @@ macOS 用の自前キーリマッパー。[Karabiner-Elements](https://karabiner
 | RShift + E / D / S / F | カーソル移動（上 / 下 / 左 / 右、押している間連続） |
 | RShift + ; + E/D/S/F | スクロール（; を併用している間） |
 | RShift + J / K / L | 左 / 中 / 右クリック |
-| RShift + N / M | 速度 2倍 / 0.3倍（押している間） |
+| RShift + N | 速度 2倍（押している間） |
+| RShift + M | 低速モード。M は押しっぱなしでよく、方向キーを押し始めた直後が極低速（小さなボタンの微調整向け）、動かし続けると約2.5秒かけて通常速度まで徐々に加速。方向キーを離して押し直すとまた最遅から |
 
 ## 必要環境
 
@@ -54,6 +55,7 @@ sh uninstall.sh
 
 - **キー割り当て**: `src/main.swift` の `staticRemap` / `routeMouse` を編集。
 - **マウス速度・スクロール量**: `MouseEngine` 冒頭の `baseSpeed`（px/秒）・`scrollSpeed` を調整。
+- **低速モード(M)のランプ**: `slowMinMultiplier`（押し始めの速度）・`slowMaxMultiplier`（到達速度）・`slowRampSeconds`（加速にかける秒数）を調整。
 
 変更後は `sh install.sh` を再実行すれば反映されます。
 

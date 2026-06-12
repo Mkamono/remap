@@ -58,10 +58,19 @@ final class MouseEngine {
     private let scrollSpeed: Double = 32.0    // ホイール量/フレーム相当
     private let tickHz: Double = 60.0
 
+    // 低速モード(M)のランプ調整用。押し始めは極低速(精密ポインティング用)、
+    // 押し続けると slowRampSeconds かけて min→max まで徐々に加速する。
+    private let slowMinMultiplier: Double = 0.04  // 押し始めの速度
+    private let slowMaxMultiplier: Double = 1.0   // 押し続けた到達速度(通常速度)
+    private let slowRampSeconds: Double = 2.5     // min→max に要する時間
+
     // --- 状態 ---
     private var activeMoveKeys: Set<Direction> = []
     private var scrollMode = false           // semicolon 押下中
-    private var speedMultiplier: Double = 1.0 // N=2.0 / M=0.3 / 既定1.0
+    private var fastActive = false           // N 押下中: 高速(×2.0)
+    private var slowActive = false           // M 押下中: 低速(動かし続けると加速)
+    private var slowStartTime = DispatchTime.now() // 低速移動エピソードの起点
+    private var heldButtons: Set<UInt32> = []      // 押し下げ保持中のボタン(ドラッグ用)
 
     private var timer: DispatchSourceTimer?
     private var cursor: CGPoint = .zero       // 自前で追跡する論理カーソル位置
@@ -70,6 +79,9 @@ final class MouseEngine {
     // 方向キーが1つでも押されている間だけタイマーを回す(アイドル時は止める)。
     private func ensureTimerRunning() {
         guard timer == nil, !activeMoveKeys.isEmpty else { return }
+        // 静止状態から移動を開始した瞬間を低速ランプの起点にする。
+        // これで M 押しっぱなしでも、方向キーを押し始めた直後は最も遅くなる。
+        slowStartTime = DispatchTime.now()
         cursor = CGEvent(source: nil)?.location ?? .zero
         let t = DispatchSource.makeTimerSource(queue: .main)
         t.schedule(deadline: .now(), repeating: 1.0 / tickHz)
@@ -87,7 +99,8 @@ final class MouseEngine {
     // -- 毎フレーム処理 ------------------------------------------------
     private func tick() {
         guard !activeMoveKeys.isEmpty else { stopTimerIfIdle(); return }
-        let perTick = baseSpeed * speedMultiplier / tickHz
+        let multiplier = currentMultiplier()
+        let perTick = baseSpeed * multiplier / tickHz
         var dx = 0.0, dy = 0.0
         if activeMoveKeys.contains(.left)  { dx -= perTick }
         if activeMoveKeys.contains(.right) { dx += perTick }
@@ -110,7 +123,7 @@ final class MouseEngine {
             //   right → wheel2 += -amount
             //
             // units: .pixel を採用。.line より細かく連続的に動くため体感が滑らか。
-            let amount = Int32((scrollSpeed * speedMultiplier).rounded())
+            let amount = Int32((scrollSpeed * multiplier).rounded())
             var wheel1: Int32 = 0  // 縦軸
             var wheel2: Int32 = 0  // 横軸
             if activeMoveKeys.contains(.up)    { wheel1 += +amount }  // 上スクロール
@@ -133,8 +146,10 @@ final class MouseEngine {
             // メイン画面だけにクランプすると複数ディスプレイの境界を越えられないため、
             // どれかのディスプレイ内なら越境を許可する。
             cursor = MouseEngine.clampToDisplays(target: target, from: cursor)
-            let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                               mouseCursorPosition: cursor, mouseButton: .left)
+            // ボタン保持中はドラッグイベント、そうでなければ通常移動。
+            let (moveType, btn) = moveEvent()
+            let move = CGEvent(mouseEventSource: nil, mouseType: moveType,
+                               mouseCursorPosition: cursor, mouseButton: btn)
             move?.post(tap: .cghidEventTap)
         }
     }
@@ -158,17 +173,51 @@ final class MouseEngine {
         return false
     }
 
-    // target がいずれかのディスプレイ内ならそのまま、そうでなければ軸ごとに
-    // 分けて越境可能な成分だけ採用する（斜め移動でディスプレイ間の隙間に
-    // 入り込むのを防ぐ）。どの軸も無効なら現在位置に留める。
+    // 走査線 y 上で、x を有効範囲にクランプした座標を返す（y を含むディスプレイが
+    // 無ければ nil）。x がいずれかのディスプレイの X 区間内ならそのまま、外なら
+    // 最寄りの端へ寄せる。隣接ディスプレイがあれば自然と越境でき、無ければ画面の
+    // きわ(端)まで到達できる。
+    private static func clampX(_ x: CGFloat, atY y: CGFloat, _ rects: [CGRect]) -> CGFloat? {
+        let spans = rects.filter { y >= $0.minY && y < $0.maxY }
+        if spans.isEmpty { return nil }
+        for s in spans where x >= s.minX && x < s.maxX { return x }
+        let eps: CGFloat = 1   // 半開区間の右端(maxX)は含まないため 1px 内側が端
+        var best: CGFloat?
+        for s in spans {
+            let c = Swift.min(Swift.max(x, s.minX), s.maxX - eps)
+            if best == nil || abs(c - x) < abs(best! - x) { best = c }
+        }
+        return best
+    }
+
+    // clampX の Y 版。
+    private static func clampY(_ y: CGFloat, atX x: CGFloat, _ rects: [CGRect]) -> CGFloat? {
+        let spans = rects.filter { x >= $0.minX && x < $0.maxX }
+        if spans.isEmpty { return nil }
+        for s in spans where y >= s.minY && y < s.maxY { return y }
+        let eps: CGFloat = 1
+        var best: CGFloat?
+        for s in spans {
+            let c = Swift.min(Swift.max(y, s.minY), s.maxY - eps)
+            if best == nil || abs(c - y) < abs(best! - y) { best = c }
+        }
+        return best
+    }
+
+    // target がいずれかのディスプレイ内ならそのまま。外なら軸ごとに端へクランプし、
+    // 画面のきわまで到達できるようにする（隣接ディスプレイがあれば越境、無ければ
+    // 端で止まる）。斜め移動でディスプレイ間の隙間に入り込むのも防ぐ。
     private static func clampToDisplays(target: CGPoint, from current: CGPoint) -> CGPoint {
         let rects = activeDisplayBounds()
         if rects.isEmpty { return target }
         if contains(rects, target) { return target }
-        let slideX = CGPoint(x: target.x, y: current.y)
-        if contains(rects, slideX) { return slideX }
-        let slideY = CGPoint(x: current.x, y: target.y)
-        if contains(rects, slideY) { return slideY }
+        let x = clampX(target.x, atY: current.y, rects) ?? current.x
+        let y = clampY(target.y, atX: x, rects) ?? current.y
+        let p = CGPoint(x: x, y: y)
+        if contains(rects, p) { return p }
+        // 念のためのフォールバック（通常ここには来ない）。
+        if contains(rects, CGPoint(x: x, y: current.y)) { return CGPoint(x: x, y: current.y) }
+        if contains(rects, CGPoint(x: current.x, y: y)) { return CGPoint(x: current.x, y: y) }
         return current
     }
 
@@ -180,42 +229,78 @@ final class MouseEngine {
 
     func setScrollMode(_ on: Bool) { scrollMode = on }
 
-    func setSpeedMultiplier(_ m: Double) { speedMultiplier = m }
+    // N: 高速。押している間 ×2.0。
+    func setFast(_ on: Bool) { fastActive = on }
 
-    func click(_ button: CGMouseButton) {
+    // M: 低速。ランプの起点は基本「移動開始時」(ensureTimerRunning) だが、
+    // 移動中に M を押した場合はその瞬間から遅くしたいので、ここでも起点を更新する。
+    // (連続キーリピートでは再開しないよう !slowActive で一度だけ)
+    func setSlow(_ on: Bool) {
+        if on && !slowActive { slowStartTime = DispatchTime.now() }
+        slowActive = on
+    }
+
+    // 現フレームの速度倍率。低速(M)が最優先で、移動開始からの経過で min→max へランプ。
+    private func currentMultiplier() -> Double {
+        if slowActive {
+            let elapsed = Double(DispatchTime.now().uptimeNanoseconds
+                                 &- slowStartTime.uptimeNanoseconds) / 1_000_000_000
+            let progress = min(max(elapsed / slowRampSeconds, 0), 1)
+            return slowMinMultiplier + (slowMaxMultiplier - slowMinMultiplier) * progress
+        }
+        if fastActive { return 2.0 }
+        return 1.0
+    }
+
+    // ボタンの押し下げ/解放。押している間は保持されるので、保持中に方向キーで
+    // 動かすとドラッグになる（tick の移動ブランチが drag イベントを送る）。
+    // チョン押し(down→すぐup)は通常のクリックとして振る舞う。
+    func setButton(_ button: CGMouseButton, pressed: Bool) {
+        if pressed {
+            // 自動キーリピートによる二重 down を無視。
+            guard heldButtons.insert(button.rawValue).inserted else { return }
+            postButton(button, down: true)
+        } else {
+            guard heldButtons.remove(button.rawValue) != nil else { return }
+            postButton(button, down: false)
+        }
+    }
+
+    private func postButton(_ button: CGMouseButton, down: Bool) {
         // 実際の現在位置を取得（タイマー未起動時は cursor が .zero の可能性があるため）。
         let pos = CGEvent(source: nil)?.location ?? cursor
-
-        // ボタン種別に応じた mouseDown/mouseUp のイベントタイプを決定。
-        let downType: CGEventType
-        let upType: CGEventType
+        let type: CGEventType
         switch button {
-        case .left:
-            downType = .leftMouseDown
-            upType   = .leftMouseUp
-        case .right:
-            downType = .rightMouseDown
-            upType   = .rightMouseUp
-        default: // .center (otherMouse)
-            downType = .otherMouseDown
-            upType   = .otherMouseUp
+        case .left:  type = down ? .leftMouseDown  : .leftMouseUp
+        case .right: type = down ? .rightMouseDown : .rightMouseUp
+        default:     type = down ? .otherMouseDown : .otherMouseUp
         }
-
-        // mouseDown → mouseUp のペアを生成して送出。
-        let down = CGEvent(mouseEventSource: nil, mouseType: downType,
-                           mouseCursorPosition: pos, mouseButton: button)
-        down?.post(tap: .cghidEventTap)
-
-        let up = CGEvent(mouseEventSource: nil, mouseType: upType,
+        let ev = CGEvent(mouseEventSource: nil, mouseType: type,
                          mouseCursorPosition: pos, mouseButton: button)
-        up?.post(tap: .cghidEventTap)
+        ev?.post(tap: .cghidEventTap)
+    }
+
+    // 保持中ボタンに応じた移動イベント種別とボタンを返す。
+    // 何も保持していなければ通常の mouseMoved。
+    private func moveEvent() -> (CGEventType, CGMouseButton) {
+        if heldButtons.contains(CGMouseButton.left.rawValue)   { return (.leftMouseDragged, .left) }
+        if heldButtons.contains(CGMouseButton.right.rawValue)  { return (.rightMouseDragged, .right) }
+        if heldButtons.contains(CGMouseButton.center.rawValue) { return (.otherMouseDragged, .center) }
+        return (.mouseMoved, .left)
     }
 
     // モード解除時(Right Shift を離した時)に全状態をリセットする。
     func reset() {
+        // 保持中のボタンは離して送出しておく(ドラッグ中に抜けてもボタンが
+        // 押しっぱなしで固まらないように)。
+        for raw in heldButtons {
+            postButton(CGMouseButton(rawValue: raw) ?? .left, down: false)
+        }
+        heldButtons.removeAll()
         activeMoveKeys.removeAll()
         scrollMode = false
-        speedMultiplier = 1.0
+        fastActive = false
+        slowActive = false
         stopTimerIfIdle()
     }
 }
@@ -382,11 +467,11 @@ final class RemapController {
         case Key.s: mouse.setMove(.left, pressed: isDown); return true
         case Key.f: mouse.setMove(.right, pressed: isDown); return true
         case Key.semicolon: mouse.setScrollMode(isDown); return true
-        case Key.n: mouse.setSpeedMultiplier(isDown ? 2.0 : 1.0); return true
-        case Key.m: mouse.setSpeedMultiplier(isDown ? 0.3 : 1.0); return true
-        case Key.j: if isDown { mouse.click(.left) };   return true
-        case Key.k: if isDown { mouse.click(.center) }; return true
-        case Key.l: if isDown { mouse.click(.right) };  return true
+        case Key.n: mouse.setFast(isDown); return true
+        case Key.m: mouse.setSlow(isDown); return true
+        case Key.j: mouse.setButton(.left,   pressed: isDown); return true
+        case Key.k: mouse.setButton(.center, pressed: isDown); return true
+        case Key.l: mouse.setButton(.right,  pressed: isDown); return true
         default: return nil
         }
     }
