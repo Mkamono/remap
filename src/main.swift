@@ -10,41 +10,297 @@ import Cocoa
 import CoreGraphics
 import ApplicationServices
 
-// =====================================================================
-// MARK: - キーコード定数 (ANSI, kVK_ANSI_*)
-// =====================================================================
-// 必要な分だけ。完全な対応表は PLAN.md セクション4。
-enum Key {
-    static let s: Int64 = 1
-    static let d: Int64 = 2
-    static let f: Int64 = 3
-    static let h: Int64 = 4
-    static let e: Int64 = 14
-    static let l: Int64 = 37
-    static let j: Int64 = 38
-    static let k: Int64 = 40
-    static let semicolon: Int64 = 41
-    static let n: Int64 = 45
-    static let m: Int64 = 46
-    static let leftBracket: Int64 = 33
-
-    // 出力側
-    static let escape: Int64 = 53
-    static let delete: Int64 = 51 // backspace (delete_or_backspace)
-    static let up: Int64 = 126
-    static let down: Int64 = 125
-    static let left: Int64 = 123
-    static let right: Int64 = 124
-
-    // flagsChanged で Left/Right を区別するための修飾キー keyCode
-    static let rightShift: Int64 = 60
-}
-
 enum Direction { case up, down, left, right }
 
 // デバッグログのオンオフ。true にすると各キーイベントと remap 発火を NSLog に出す。
 // 不具合調査時のみ true にする（キーコードがログに残るため、通常は false）。
 let remapDebug = false
+
+// =====================================================================
+// MARK: - キー名テーブル (設定ファイルの文字列 ↔ 仮想キーコード)
+// =====================================================================
+// 設定ファイルではキーを "e" / "semicolon" / "right_shift" のような名前で書く。
+// それを内部の仮想キーコード(kVK_*)へ変換する対応表。
+enum KeyNames {
+    static let table: [String: Int64] = [
+        // 英字・数字・記号 (kVK_ANSI_*)
+        "a": 0, "s": 1, "d": 2, "f": 3, "h": 4, "g": 5, "z": 6, "x": 7,
+        "c": 8, "v": 9, "b": 11, "q": 12, "w": 13, "e": 14, "r": 15, "y": 16,
+        "t": 17, "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23,
+        "equal": 24, "9": 25, "7": 26, "minus": 27, "8": 28, "0": 29,
+        "right_bracket": 30, "o": 31, "u": 32, "left_bracket": 33, "i": 34,
+        "p": 35, "return": 36, "l": 37, "j": 38, "quote": 39, "k": 40,
+        "semicolon": 41, "backslash": 42, "comma": 43, "slash": 44, "n": 45,
+        "m": 46, "period": 47, "tab": 48, "space": 49, "grave": 50,
+        // 特殊キー
+        "delete": 51, "backspace": 51, "escape": 53, "esc": 53,
+        "forward_delete": 117, "up": 126, "down": 125, "left": 123, "right": 124,
+        "home": 115, "end": 119, "page_up": 116, "page_down": 121,
+        // 修飾キー (モードキー用)
+        "command": 55, "left_command": 55, "right_command": 54,
+        "shift": 56, "left_shift": 56, "right_shift": 60, "caps_lock": 57,
+        "option": 58, "left_option": 58, "right_option": 61,
+        "control": 59, "left_control": 59, "right_control": 62, "function": 63,
+    ]
+
+    // 修飾キーの flagsChanged で「押された」を判定するためのデバイス依存ビット
+    // (NX_DEVICE*KEYMASK)。左右を区別できるよう keyCode 単位で持つ。
+    static let deviceBit: [Int64: UInt64] = [
+        59: 0x1, 56: 0x2, 60: 0x4, 55: 0x8, 54: 0x10, 58: 0x20, 61: 0x40, 62: 0x2000,
+    ]
+
+    // 静的リマップのトリガ修飾名 → CGEventFlags マスク。
+    static let modifierMask: [String: CGEventFlags] = [
+        "control": .maskControl, "shift": .maskShift,
+        "option": .maskAlternate, "command": .maskCommand,
+    ]
+
+    static func code(_ name: String) -> Int64? { table[name.lowercased()] }
+}
+
+// マウスモードで物理キーに割り当てられる動作。
+enum MouseAction {
+    case move(Direction)
+    case scroll
+    case fast
+    case slow
+    case button(CGMouseButton)
+}
+
+// =====================================================================
+// MARK: - 設定 (config.json から読む。無ければ下記デフォルト)
+// =====================================================================
+// マウスエンジンの数値チューニング。
+struct MouseTuning {
+    var baseSpeed: Double = 1536.0
+    var scrollSpeed: Double = 32.0
+    var tickHz: Double = 60.0
+    var slowMinMultiplier: Double = 0.04
+    var slowMaxMultiplier: Double = 1.0
+    var slowRampSeconds: Double = 1.5
+    var fastMultiplier: Double = 2.0
+}
+
+struct Config {
+    var tuning = MouseTuning()
+    var modeKeyCode: Int64 = 60                  // right_shift
+    var mouseBindings: [Int64: MouseAction] = Config.defaultMouseBindings
+    var remapModifier: CGEventFlags = .maskControl
+    var remapTable: [Int64: Int64] = Config.defaultRemapTable
+    var capsToControl = true
+
+    // 既定のマウスモード割り当て (keyCode → 動作)。
+    static let defaultMouseBindings: [Int64: MouseAction] = [
+        14: .move(.up), 2: .move(.down), 1: .move(.left), 3: .move(.right),
+        41: .scroll, 45: .fast, 46: .slow,
+        38: .button(.left), 40: .button(.center), 37: .button(.right),
+    ]
+    // 既定の静的リマップ (入力keyCode → 出力keyCode)。Ctrl 前提。
+    static let defaultRemapTable: [Int64: Int64] = [
+        14: 126, 2: 125, 1: 123, 3: 124, 33: 53, 4: 51,
+    ]
+
+    // 動作名 → MouseAction (mouseMode セクションのフィールド名に対応)。
+    private static let mouseFieldAction: [String: MouseAction] = [
+        "moveUp": .move(.up), "moveDown": .move(.down),
+        "moveLeft": .move(.left), "moveRight": .move(.right),
+        "scroll": .scroll, "fast": .fast, "slow": .slow,
+        "leftClick": .button(.left), "middleClick": .button(.center),
+        "rightClick": .button(.right),
+    ]
+    // mouseMode の既定キー名 (省略時に使う)。
+    private static let mouseFieldDefaultName: [String: String] = [
+        "moveUp": "e", "moveDown": "d", "moveLeft": "s", "moveRight": "f",
+        "scroll": "semicolon", "fast": "n", "slow": "m",
+        "leftClick": "j", "middleClick": "k", "rightClick": "l",
+    ]
+
+    // JSON データから設定を組み立てる。欠落・不正なフィールドはデフォルトのまま。
+    static func load(from data: Data) -> Config {
+        var cfg = Config()
+        guard let root = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            NSLog("[remap] config.json をパースできませんでした。デフォルト設定で動作します。")
+            return cfg
+        }
+
+        // mouse: 数値チューニング
+        if let m = root["mouse"] as? [String: Any] {
+            func n(_ k: String) -> Double? { (m[k] as? NSNumber)?.doubleValue }
+            if let v = n("baseSpeed")          { cfg.tuning.baseSpeed = v }
+            if let v = n("scrollSpeed")        { cfg.tuning.scrollSpeed = v }
+            if let v = n("tickHz"), v > 0      { cfg.tuning.tickHz = v }
+            if let v = n("slowMinMultiplier")  { cfg.tuning.slowMinMultiplier = v }
+            if let v = n("slowMaxMultiplier")  { cfg.tuning.slowMaxMultiplier = v }
+            if let v = n("slowRampSeconds"), v > 0 { cfg.tuning.slowRampSeconds = v }
+            if let v = n("fastMultiplier")     { cfg.tuning.fastMultiplier = v }
+        }
+
+        // mouseMode: モードキーと各動作のキー割り当て
+        var names = mouseFieldDefaultName
+        if let mm = root["mouseMode"] as? [String: Any] {
+            if let s = mm["modeKey"] as? String, let kc = KeyNames.code(s) {
+                cfg.modeKeyCode = kc
+            }
+            for field in Array(names.keys) {
+                if let s = mm[field] as? String { names[field] = s }
+            }
+        }
+        var binds: [Int64: MouseAction] = [:]
+        for (field, name) in names {
+            if let kc = KeyNames.code(name), let action = mouseFieldAction[field] {
+                binds[kc] = action
+            }
+        }
+        if !binds.isEmpty { cfg.mouseBindings = binds }
+
+        // remap: トリガ修飾と入力→出力の対応
+        if let rm = root["remap"] as? [String: Any] {
+            if let mod = rm["modifier"] as? String,
+               let mask = KeyNames.modifierMask[mod.lowercased()] {
+                cfg.remapModifier = mask
+            }
+            if let b = rm["bindings"] as? [String: Any] {
+                var table: [Int64: Int64] = [:]
+                for (inName, out) in b {
+                    if let inCode = KeyNames.code(inName),
+                       let outName = out as? String,
+                       let outCode = KeyNames.code(outName) {
+                        table[inCode] = outCode
+                    }
+                }
+                if !table.isEmpty { cfg.remapTable = table }
+            }
+        }
+
+        // capsLock: Caps Lock を Left Control にするか
+        if let cl = root["capsLock"] as? [String: Any],
+           let b = cl["remapToControl"] as? Bool {
+            cfg.capsToControl = b
+        }
+
+        return cfg
+    }
+
+    // 初回生成用のデフォルト設定ファイル本文 (上のデフォルト値と一致)。
+    static let defaultFileContents = """
+    {
+      "mouse": {
+        "baseSpeed": 1536,
+        "scrollSpeed": 32,
+        "tickHz": 60,
+        "slowMinMultiplier": 0.04,
+        "slowMaxMultiplier": 1.0,
+        "slowRampSeconds": 1.5,
+        "fastMultiplier": 2.0
+      },
+      "mouseMode": {
+        "modeKey": "right_shift",
+        "moveUp": "e",
+        "moveDown": "d",
+        "moveLeft": "s",
+        "moveRight": "f",
+        "scroll": "semicolon",
+        "fast": "n",
+        "slow": "m",
+        "leftClick": "j",
+        "middleClick": "k",
+        "rightClick": "l"
+      },
+      "remap": {
+        "modifier": "control",
+        "bindings": {
+          "e": "up",
+          "d": "down",
+          "s": "left",
+          "f": "right",
+          "left_bracket": "escape",
+          "h": "delete"
+        }
+      },
+      "capsLock": {
+        "remapToControl": true
+      }
+    }
+
+    """
+}
+
+// =====================================================================
+// MARK: - 設定ファイルの場所・読み込み・監視
+// =====================================================================
+enum ConfigStore {
+    // ~/.config/remap/config.json
+    static var fileURL: URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".config/remap/config.json")
+    }
+
+    // 設定を読む。ファイルが無ければデフォルトを書き出して生成する。
+    static func loadOrCreate() -> Config {
+        let url = fileURL
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            do {
+                try fm.createDirectory(at: url.deletingLastPathComponent(),
+                                       withIntermediateDirectories: true)
+                try Config.defaultFileContents.write(to: url, atomically: true, encoding: .utf8)
+                NSLog("[remap] 既定の設定ファイルを作成しました: \(url.path)")
+            } catch {
+                NSLog("[remap] 設定ファイルを作成できませんでした (\(error))。デフォルト設定で動作します。")
+                return Config()
+            }
+        }
+        guard let data = try? Data(contentsOf: url) else {
+            NSLog("[remap] 設定ファイルを読めませんでした。デフォルト設定で動作します。")
+            return Config()
+        }
+        return Config.load(from: data)
+    }
+}
+
+// config.json を含むディレクトリを監視し、変更時に再読込する。
+// ディレクトリを見張るのでエディタの「保存=置き換え」(atomic save)でも取りこぼさない。
+final class ConfigWatcher {
+    private let dirURL: URL
+    private let onChange: () -> Void
+    private var fd: Int32 = -1
+    private var source: DispatchSourceFileSystemObject?
+    private var pending = false
+
+    init(onChange: @escaping () -> Void) {
+        self.dirURL = ConfigStore.fileURL.deletingLastPathComponent()
+        self.onChange = onChange
+    }
+
+    func start() {
+        fd = open(dirURL.path, O_EVTONLY)
+        guard fd >= 0 else {
+            NSLog("[remap] 設定ディレクトリの監視を開始できません: \(dirURL.path)")
+            return
+        }
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .delete, .extend, .attrib],
+            queue: .main)
+        src.setEventHandler { [weak self] in self?.coalesce() }
+        src.setCancelHandler { [weak self] in
+            if let fd = self?.fd, fd >= 0 { close(fd) }
+        }
+        source = src
+        src.resume()
+        NSLog("[remap] 設定ファイルの監視を開始しました: \(ConfigStore.fileURL.path)")
+    }
+
+    // 保存方式によって短時間に複数イベントが来るので、少し待ってまとめて反映する。
+    private func coalesce() {
+        if pending { return }
+        pending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            self?.pending = false
+            self?.onChange()
+        }
+    }
+}
 
 // =====================================================================
 // MARK: - MouseEngine
@@ -53,16 +309,11 @@ let remapDebug = false
 // 押されている方向の集合を保持し ~60Hz のタイマーで毎フレーム座標を更新する。
 final class MouseEngine {
 
-    // --- 調整用定数 (PLAN.md セクション7: 実装後に体感で詰める) ---
-    private let baseSpeed: Double = 1536.0   // px/秒 (Karabiner の値)
-    private let scrollSpeed: Double = 32.0    // ホイール量/フレーム相当
-    private let tickHz: Double = 60.0
-
-    // 低速モード(M)のランプ調整用。押し始めは極低速(精密ポインティング用)、
-    // 押し続けると slowRampSeconds かけて min→max まで徐々に加速する。
-    private let slowMinMultiplier: Double = 0.04  // 押し始めの速度
-    private let slowMaxMultiplier: Double = 1.0   // 押し続けた到達速度(通常速度)
-    private let slowRampSeconds: Double = 2.5     // min→max に要する時間
+    // --- 調整用パラメータ ---
+    // 既定値は MouseTuning の初期値。config.json があれば起動時/保存時に差し替わる。
+    // (baseSpeed=px/秒, scrollSpeed=ホイール量/フレーム相当, tickHz=更新頻度,
+    //  slowMin/Max/RampSeconds=低速モードのランプ, fastMultiplier=高速倍率)
+    var tuning = MouseTuning()
 
     // --- 状態 ---
     private var activeMoveKeys: Set<Direction> = []
@@ -84,7 +335,7 @@ final class MouseEngine {
         slowStartTime = DispatchTime.now()
         cursor = CGEvent(source: nil)?.location ?? .zero
         let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now(), repeating: 1.0 / tickHz)
+        t.schedule(deadline: .now(), repeating: 1.0 / tuning.tickHz)
         t.setEventHandler { [weak self] in self?.tick() }
         timer = t
         t.resume()
@@ -100,7 +351,7 @@ final class MouseEngine {
     private func tick() {
         guard !activeMoveKeys.isEmpty else { stopTimerIfIdle(); return }
         let multiplier = currentMultiplier()
-        let perTick = baseSpeed * multiplier / tickHz
+        let perTick = tuning.baseSpeed * multiplier / tuning.tickHz
         var dx = 0.0, dy = 0.0
         if activeMoveKeys.contains(.left)  { dx -= perTick }
         if activeMoveKeys.contains(.right) { dx += perTick }
@@ -123,7 +374,7 @@ final class MouseEngine {
             //   right → wheel2 += -amount
             //
             // units: .pixel を採用。.line より細かく連続的に動くため体感が滑らか。
-            let amount = Int32((scrollSpeed * multiplier).rounded())
+            let amount = Int32((tuning.scrollSpeed * multiplier).rounded())
             var wheel1: Int32 = 0  // 縦軸
             var wheel2: Int32 = 0  // 横軸
             if activeMoveKeys.contains(.up)    { wheel1 += +amount }  // 上スクロール
@@ -245,10 +496,11 @@ final class MouseEngine {
         if slowActive {
             let elapsed = Double(DispatchTime.now().uptimeNanoseconds
                                  &- slowStartTime.uptimeNanoseconds) / 1_000_000_000
-            let progress = min(max(elapsed / slowRampSeconds, 0), 1)
-            return slowMinMultiplier + (slowMaxMultiplier - slowMinMultiplier) * progress
+            let progress = min(max(elapsed / tuning.slowRampSeconds, 0), 1)
+            return tuning.slowMinMultiplier
+                + (tuning.slowMaxMultiplier - tuning.slowMinMultiplier) * progress
         }
-        if fastActive { return 2.0 }
+        if fastActive { return tuning.fastMultiplier }
         return 1.0
     }
 
@@ -313,6 +565,9 @@ final class RemapController {
 
     let mouse = MouseEngine()
     var enabled = true          // メニューバーの ON/OFF トグル
+    var config = Config() {     // config.json 由来。再読込で差し替わる。
+        didSet { mouse.tuning = config.tuning }
+    }
 
     private var mouseMode = false  // Right Shift 物理押下中か
     private var tap: CFMachPort?
@@ -373,13 +628,14 @@ final class RemapController {
             NSLog("[remap][ev] type=\(type.rawValue) keyCode=\(keyCode) ctrl=\(flags.contains(.maskControl)) shift=\(flags.contains(.maskShift)) mouseMode=\(mouseMode)")
         }
 
-        // (1) flagsChanged: Right Shift を追跡してマウスモードを切替。
+        // (1) flagsChanged: モードキー(既定 Right Shift)を追跡してマウスモードを切替。
         if type == .flagsChanged {
-            if keyCode == Key.rightShift {
-                // NX_DEVICERSHIFTKEYMASK (0x4) で Right Shift 単独を判定する。
-                // .maskShift は Left/Right 両方で立つため、Left Shift 併用時に
-                // Right Shift を離しても解除されない問題を回避する。
-                let pressed = (event.flags.rawValue & 0x4) != 0
+            if keyCode == config.modeKeyCode {
+                // デバイス依存ビット(NX_DEVICE*KEYMASK)で左右を区別して押下判定する。
+                // .maskShift 等は Left/Right 両方で立つため、併用時に取りこぼす問題を避ける。
+                // (右Shift なら 0x4。テーブルに無いキーは 0x4 にフォールバック)
+                let bit = KeyNames.deviceBit[keyCode] ?? 0x4
+                let pressed = (event.flags.rawValue & bit) != 0
                 if pressed {
                     mouseMode = true
                 } else {
@@ -415,17 +671,18 @@ final class RemapController {
             if let existing = remappedDown[keyCode] {
                 event.setIntegerValueField(.keyboardEventKeycode, value: existing)
                 var f = flags
-                f.remove(.maskControl)
+                f.remove(config.remapModifier)
                 event.flags = f
                 return Unmanaged.passUnretained(event)
             }
-            // keyDown(2): 新規。Control 押下中かつリマップ対象なら辞書に記録して差し替える。
-            if flags.contains(.maskControl), let newKey = staticRemap(keyCode: keyCode) {
+            // keyDown(2): 新規。トリガ修飾(既定 Control)押下中かつリマップ対象なら
+            // 辞書に記録して差し替える。
+            if flags.contains(config.remapModifier), let newKey = staticRemap(keyCode: keyCode) {
                 if remapDebug { NSLog("[remap][remap] keyCode \(keyCode) -> \(newKey) を発火") }
                 remappedDown[keyCode] = newKey          // 元keyCode -> 出力keyCode を記録
                 event.setIntegerValueField(.keyboardEventKeycode, value: newKey)
                 var f = flags
-                f.remove(.maskControl)                  // control を取り除き
+                f.remove(config.remapModifier)          // トリガ修飾を取り除き
                 event.flags = f                         // 他修飾(Shift等)はそのまま透過
                 return Unmanaged.passUnretained(event)
             }
@@ -435,7 +692,7 @@ final class RemapController {
             if let newKey = remappedDown.removeValue(forKey: keyCode) {
                 event.setIntegerValueField(.keyboardEventKeycode, value: newKey)
                 var f = flags
-                f.remove(.maskControl)                  // 念のため control を除去
+                f.remove(config.remapModifier)          // 念のためトリガ修飾を除去
                 event.flags = f
                 return Unmanaged.passUnretained(event)
             }
@@ -444,36 +701,25 @@ final class RemapController {
         return Unmanaged.passUnretained(event)
     }
 
-    // -- 静的リマップ表 (2-2, 2-3) -------------------------------------
-    // Left Control 前提。該当しなければ nil。
+    // -- 静的リマップ表 -------------------------------------------------
+    // トリガ修飾(既定 Control)前提。該当しなければ nil。config.json で定義。
     private func staticRemap(keyCode: Int64) -> Int64? {
-        switch keyCode {
-        case Key.e: return Key.up
-        case Key.d: return Key.down
-        case Key.s: return Key.left
-        case Key.f: return Key.right
-        case Key.leftBracket: return Key.escape
-        case Key.h: return Key.delete
-        default: return nil
-        }
+        config.remapTable[keyCode]
     }
 
-    // -- マウス入力ルーティング (2-4) ----------------------------------
+    // -- マウス入力ルーティング ----------------------------------------
     // 戻り値: nil=対象外(マウスモードでも素通し), true=消費, false=素通し。
+    // 割り当ては config.mouseBindings (config.json) で定義。
     private func routeMouse(keyCode: Int64, isDown: Bool) -> Bool? {
-        switch keyCode {
-        case Key.e: mouse.setMove(.up, pressed: isDown); return true
-        case Key.d: mouse.setMove(.down, pressed: isDown); return true
-        case Key.s: mouse.setMove(.left, pressed: isDown); return true
-        case Key.f: mouse.setMove(.right, pressed: isDown); return true
-        case Key.semicolon: mouse.setScrollMode(isDown); return true
-        case Key.n: mouse.setFast(isDown); return true
-        case Key.m: mouse.setSlow(isDown); return true
-        case Key.j: mouse.setButton(.left,   pressed: isDown); return true
-        case Key.k: mouse.setButton(.center, pressed: isDown); return true
-        case Key.l: mouse.setButton(.right,  pressed: isDown); return true
-        default: return nil
+        guard let action = config.mouseBindings[keyCode] else { return nil }
+        switch action {
+        case .move(let dir):  mouse.setMove(dir, pressed: isDown)
+        case .scroll:         mouse.setScrollMode(isDown)
+        case .fast:           mouse.setFast(isDown)
+        case .slow:           mouse.setSlow(isDown)
+        case .button(let b):  mouse.setButton(b, pressed: isDown)
         }
+        return true
     }
 }
 
@@ -527,10 +773,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signalSources: [DispatchSourceSignal] = []
     // アクセシビリティ権限の付与を待つポーリングタイマー。
     private var axPollTimer: Timer?
+    // config.json の変更監視。解放されないよう保持する。
+    private var configWatcher: ConfigWatcher?
+    // 現在 Caps Lock → Control のリマップを適用済みか。
+    private var capsApplied = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        NSLog("[remap] 起動。Caps Lock リマップを適用します。")
-        CapsLockRemap.apply()
+        NSLog("[remap] 起動。設定を読み込みます。")
+        // 設定を読み込んで適用 (Caps Lock のリマップ可否もここで決まる)。
+        reloadConfig()
+        // 設定ファイルの変更を監視し、保存されたら再ビルドなしで反映する。
+        configWatcher = ConfigWatcher { [weak self] in self?.reloadConfig() }
+        configWatcher?.start()
 
         // アクセシビリティ権限を確認し、未許可の場合はシステムのダイアログを促す。
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
@@ -573,6 +827,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         CapsLockRemap.revert()
+    }
+
+    // config.json を読み込み、コントローラと Caps Lock リマップに反映する。
+    // 起動時と、設定ファイル保存の検知時の両方から呼ばれる。
+    private func reloadConfig() {
+        let cfg = ConfigStore.loadOrCreate()
+        controller.config = cfg   // didSet で mouse.tuning も更新される
+        // Caps Lock のリマップは現在の適用状態と差分があるときだけ切り替える。
+        if cfg.capsToControl && !capsApplied {
+            CapsLockRemap.apply()
+            capsApplied = true
+        } else if !cfg.capsToControl && capsApplied {
+            CapsLockRemap.revert()
+            capsApplied = false
+        }
+        NSLog("[remap] 設定を適用しました。")
     }
 
     private func setupMenuBar() {

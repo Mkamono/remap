@@ -51,13 +51,45 @@ sh uninstall.sh
 
 自動起動の解除・常駐停止・Caps Lock の復元を行います。アクセシビリティ権限の登録も消す場合は `tccutil reset Accessibility com.local.remap`。
 
-## カスタマイズ
+## カスタマイズ（設定ファイル）
 
-- **キー割り当て**: `src/main.swift` の `staticRemap` / `routeMouse` を編集。
-- **マウス速度・スクロール量**: `MouseEngine` 冒頭の `baseSpeed`（px/秒）・`scrollSpeed` を調整。
-- **低速モード(M)のランプ**: `slowMinMultiplier`（押し始めの速度）・`slowMaxMultiplier`（到達速度）・`slowRampSeconds`（加速にかける秒数）を調整。
+設定は `~/.config/remap/config.json` に外だしされています。初回起動時に既定値で自動生成されるので、それを編集してください。**保存すると即反映**されます（再ビルド・再起動・権限の再付与は不要）。ファイルが無い・壊れている場合は組み込みのデフォルトで動きます。
 
-変更後は `sh install.sh` を再実行すれば反映されます。
+```jsonc
+{
+  "mouse": {                  // 数値チューニング
+    "baseSpeed": 1536,        // カーソル速度 px/秒
+    "scrollSpeed": 32,        // スクロール量/フレーム相当
+    "tickHz": 60,             // 更新頻度
+    "slowMinMultiplier": 0.04,// 低速(M)の押し始め速度
+    "slowMaxMultiplier": 1.0, // 低速(M)の到達速度
+    "slowRampSeconds": 1.5,   // 低速(M)が min→max に加速する秒数
+    "fastMultiplier": 2.0     // 高速(N)の倍率
+  },
+  "mouseMode": {              // マウスモードのキー割り当て
+    "modeKey": "right_shift", // マウスモードに入る修飾キー
+    "moveUp": "e", "moveDown": "d", "moveLeft": "s", "moveRight": "f",
+    "scroll": "semicolon", "fast": "n", "slow": "m",
+    "leftClick": "j", "middleClick": "k", "rightClick": "l"
+  },
+  "remap": {                  // 静的リマップ（修飾キー + キー → 別キー）
+    "modifier": "control",    // トリガ修飾: control / shift / option / command
+    "bindings": {
+      "e": "up", "d": "down", "s": "left", "f": "right",
+      "left_bracket": "escape", "h": "delete"
+    }
+  },
+  "capsLock": {
+    "remapToControl": true    // Caps Lock を Left Control にするか
+  }
+}
+```
+
+キーは名前で指定します（`a`〜`z` / `0`〜`9` / `semicolon`・`left_bracket`・`minus` などの記号 / `up`・`down`・`escape`・`delete`・`tab`・`space` などの特殊キー / `right_shift`・`right_command` などの修飾キー）。指定を省略したフィールドはデフォルト値のままになります。
+
+> JSON 自体はコメント非対応です。上の例の `//` は説明用なので、実ファイルには書かないでください。
+
+`src/main.swift` 内のロジック自体を変えたときだけ `sh install.sh` の再実行が必要です。
 
 ## 仕組みのメモ
 
