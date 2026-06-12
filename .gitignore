@@ -1,0 +1,9 @@
+# ビルド成果物
+remap.app/
+remap
+
+# Claude Code のセッション / メモリ（公開しない）
+.claude/
+
+# macOS
+.DS_Store
