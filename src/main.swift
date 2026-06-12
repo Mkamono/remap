@@ -323,6 +323,13 @@ final class MouseEngine {
     private var slowStartTime = DispatchTime.now() // 低速移動エピソードの起点
     private var heldButtons: Set<UInt32> = []      // 押し下げ保持中のボタン(ドラッグ用)
 
+    // 連続クリック検出 (ダブル/トリプルクリック = 単語/行選択用)。ボタンごとに
+    // 直近の down 時刻・位置・クリック回数を保持し、短時間・近距離なら回数を増やす。
+    // 合成イベントは mouseEventClickState を自分で乗せないと常に単発クリック扱いになる。
+    private var clickCount: [UInt32: Int64] = [:]
+    private var lastClickTime: [UInt32: DispatchTime] = [:]
+    private var lastClickPos: [UInt32: CGPoint] = [:]
+
     private var timer: DispatchSourceTimer?
     private var cursor: CGPoint = .zero       // 自前で追跡する論理カーソル位置
 
@@ -521,6 +528,32 @@ final class MouseEngine {
     private func postButton(_ button: CGMouseButton, down: Bool) {
         // 実際の現在位置を取得（タイマー未起動時は cursor が .zero の可能性があるため）。
         let pos = CGEvent(source: nil)?.location ?? cursor
+        let raw = button.rawValue
+
+        // クリック回数の決定。down のときに「前回 down から doubleClickInterval 以内
+        // かつほぼ同じ位置」なら回数を +1（ダブル/トリプル…）、そうでなければ 1。
+        // up は直前の down と同じ回数を踏襲して down/up の整合を取る。
+        let count: Int64
+        if down {
+            let now = DispatchTime.now()
+            let near: Bool
+            if let lp = lastClickPos[raw] {
+                near = abs(lp.x - pos.x) < 4 && abs(lp.y - pos.y) < 4
+            } else { near = false }
+            if let lt = lastClickTime[raw], near,
+               Double(now.uptimeNanoseconds &- lt.uptimeNanoseconds) / 1_000_000_000
+                 <= NSEvent.doubleClickInterval {
+                count = (clickCount[raw] ?? 0) + 1
+            } else {
+                count = 1
+            }
+            clickCount[raw] = count
+            lastClickTime[raw] = now
+            lastClickPos[raw] = pos
+        } else {
+            count = clickCount[raw] ?? 1
+        }
+
         let type: CGEventType
         switch button {
         case .left:  type = down ? .leftMouseDown  : .leftMouseUp
@@ -529,6 +562,7 @@ final class MouseEngine {
         }
         let ev = CGEvent(mouseEventSource: nil, mouseType: type,
                          mouseCursorPosition: pos, mouseButton: button)
+        ev?.setIntegerValueField(.mouseEventClickState, value: count)
         ev?.post(tap: .cghidEventTap)
     }
 
