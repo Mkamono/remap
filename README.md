@@ -41,8 +41,9 @@ macOS 用の自前キーリマッパー。[Karabiner-Elements](https://karabiner
 
 ## 配布モデル
 
-remap 自身は「起動されたら常駐してリマップを提供する」ことだけを担当します。
-インストール先やログイン時自動起動は、マシン設定側（例: mise の bootstrap）で管理する想定です。
+新しい推奨構成では、remap 自身は「起動されたら常駐してリマップを提供する」ことだけを担当し、インストール先やログイン時自動起動はマシン設定側（例: mise の bootstrap）で管理します。
+
+既存の `build.sh` / `install.sh` / `uninstall.sh` は移行互換のため当面残します。従来どおり repo clone から使う場合は引き続き利用できますが、新規セットアップでは GitHub Releases + mise を推奨します。
 
 `vX.Y.Z` tag を push すると GitHub Actions が以下を行います。
 
