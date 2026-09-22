@@ -21,7 +21,7 @@ jobs:
       - name: Build remap.app
         env:
           VERSION: ${{ steps.version.outputs.version }}
-        run: ./scripts/build-app.sh
+        run: bash scripts/build-app.sh
 
       - name: Package release asset
         id: package
