@@ -4,11 +4,13 @@ macOS 用の自前キーリマッパー。[Karabiner-Elements](https://karabiner
 
 - **Swift 単一ファイル + `CGEventTap`** によるネイティブ実装
 - カーネル拡張・ドライバ不要。**アクセシビリティ権限のみ**で動作
-- メニューバー常駐（Dock アイコンなし）／ログイン時自動起動
+- メニューバー常駐（Dock アイコンなし）
+- 設定ファイルを保存すると即時反映
 
 ## 機能
 
 ### キーリマップ
+
 | 入力 | 出力 |
 |------|------|
 | Caps Lock | Left Control |
@@ -20,92 +22,119 @@ macOS 用の自前キーリマッパー。[Karabiner-Elements](https://karabiner
 一度リマップされたキーは、修飾キーを先に離しても、その物理キーを離すまで素の文字が入力されません。
 
 ### マウスフルエミュレーション（Right Shift を押している間）
+
 | 入力 | 動作 |
 |------|------|
 | RShift + E / D / S / F | カーソル移動（上 / 下 / 左 / 右、押している間連続） |
-| RShift + ; + E/D/S/F | スクロール（; を併用している間） |
+| RShift + ; + E/D/S/F | スクロール |
 | RShift + J / K / L | 左 / 中 / 右クリック |
-| RShift + N | 速度 2倍（押している間） |
-| RShift + M | 低速モード。M は押しっぱなしでよく、方向キーを押し始めた直後が極低速（小さなボタンの微調整向け）、動かし続けると約2.5秒かけて通常速度まで徐々に加速。方向キーを離して押し直すとまた最遅から |
+| RShift + N | 速度 2倍 |
+| RShift + M | 低速モード。押し始めは極低速で、動かし続けると通常速度まで徐々に加速 |
 
 ## 必要環境
 
 - macOS 13 以降
-- Xcode Command Line Tools（`swiftc` が使えればOK。`xcode-select --install`）
+- Apple Silicon
+- Accessibility 権限
 
-## インストール
+ローカルビルドには Xcode Command Line Tools（`swiftc`）も必要です。
+
+## 配布モデル
+
+remap 自身は「起動されたら常駐してリマップを提供する」ことだけを担当します。
+インストール先やログイン時自動起動は、マシン設定側（例: mise の bootstrap）で管理する想定です。
+
+`vX.Y.Z` tag を push すると GitHub Actions が以下を行います。
+
+1. arm64 向け `remap.app` をビルド
+2. ad-hoc code signing
+3. `remap-<version>-arm64.zip` と SHA-256 を GitHub Release に公開
+4. その Release を参照する `mise.example.toml` を main に更新
+
+`mise.example.toml` には、`/Applications/remap.app` へのインストールと、任意の LaunchAgent 設定が含まれます。
+
+> GitHub Releases のビルドは Developer ID 署名・notarization を行いません。初回起動時の Gatekeeper 操作や Accessibility 許可は手動で必要です。また ad-hoc 署名のため、アプリ更新後に Accessibility の再許可が必要になる場合があります。
+
+## ローカルビルド
 
 ```sh
-sh install.sh
+./scripts/build-app.sh
+open dist/remap.app
 ```
 
-ビルドして LaunchAgent に登録し、起動します。初回のみ **システム設定 → プライバシーとセキュリティ → アクセシビリティ** で `remap` を許可してください（許可した瞬間に自動で有効化されます。再起動不要）。
+成果物は `dist/remap.app` に生成されます。
 
-以降はログインのたびに自動で常駐します。メニューバーの ⌨ アイコンから ON/OFF・終了ができます。
-
-## アンインストール
+ローカルの Keychain に code-signing identity `remap-signing` が存在する場合はそれを使って署名し、存在しなければ ad-hoc 署名へフォールバックします。別名を使う場合は `SIGN_IDENTITY` を指定できます。
 
 ```sh
-sh uninstall.sh
+SIGN_IDENTITY=my-signing ./scripts/build-app.sh
 ```
 
-自動起動の解除・常駐停止・Caps Lock の復元を行います。アクセシビリティ権限の登録も消す場合は `tccutil reset Accessibility com.local.remap`。
+安定したローカル署名 identity を使うと、同じ Mac 上での再ビルド時に Accessibility 権限を維持しやすくなります。
 
-## カスタマイズ（設定ファイル）
+## Accessibility 権限
 
-設定は `~/.config/remap/config.json` に外だしされています。初回起動時に既定値で自動生成されるので、それを編集してください。**保存すると即反映**されます（再ビルド・再起動・権限の再付与は不要）。ファイルが無い・壊れている場合は組み込みのデフォルトで動きます。
+初回起動時に **システム設定 → プライバシーとセキュリティ → アクセシビリティ** で `remap` を許可してください。
 
-```jsonc
+権限が未付与の場合、remap は許可状態を監視し、許可された時点で `CGEventTap` を開始します。
+
+## 設定
+
+設定は次の JSON ファイルです。
+
+```text
+~/.config/remap/config.json
+```
+
+ファイルが無ければ初回起動時にデフォルトを生成します。保存すると再起動なしで反映されます。
+
+```json
 {
-  "mouse": {                  // 数値チューニング
-    "baseSpeed": 1536,        // カーソル速度 px/秒
-    "scrollSpeed": 32,        // スクロール量/フレーム相当
-    "tickHz": 60,             // 更新頻度
-    "slowMinMultiplier": 0.04,// 低速(M)の押し始め速度
-    "slowMaxMultiplier": 1.0, // 低速(M)の到達速度
-    "slowRampSeconds": 1.5,   // 低速(M)が min→max に加速する秒数
-    "fastMultiplier": 2.0     // 高速(N)の倍率
+  "mouse": {
+    "baseSpeed": 1536,
+    "scrollSpeed": 32,
+    "tickHz": 60,
+    "slowMinMultiplier": 0.04,
+    "slowMaxMultiplier": 1.0,
+    "slowRampSeconds": 1.5,
+    "fastMultiplier": 2.0
   },
-  "mouseMode": {              // マウスモードのキー割り当て
-    "modeKey": "right_shift", // マウスモードに入る修飾キー
-    "moveUp": "e", "moveDown": "d", "moveLeft": "s", "moveRight": "f",
-    "scroll": "semicolon", "fast": "n", "slow": "m",
-    "leftClick": "j", "middleClick": "k", "rightClick": "l"
+  "mouseMode": {
+    "modeKey": "right_shift",
+    "moveUp": "e",
+    "moveDown": "d",
+    "moveLeft": "s",
+    "moveRight": "f",
+    "scroll": "semicolon",
+    "fast": "n",
+    "slow": "m",
+    "leftClick": "j",
+    "middleClick": "k",
+    "rightClick": "l"
   },
-  "remap": {                  // 静的リマップ（修飾キー + キー → 別キー）
-    "modifier": "control",    // トリガ修飾: control / shift / option / command
+  "remap": {
+    "modifier": "control",
     "bindings": {
-      "e": "up", "d": "down", "s": "left", "f": "right",
-      "left_bracket": "escape", "h": "delete"
+      "e": "up",
+      "d": "down",
+      "s": "left",
+      "f": "right",
+      "left_bracket": "escape",
+      "h": "delete"
     }
   },
   "capsLock": {
-    "remapToControl": true    // Caps Lock を Left Control にするか
+    "remapToControl": true
   }
 }
 ```
 
-キーは名前で指定します（`a`〜`z` / `0`〜`9` / `semicolon`・`left_bracket`・`minus` などの記号 / `up`・`down`・`escape`・`delete`・`tab`・`space` などの特殊キー / `right_shift`・`right_command` などの修飾キー）。指定を省略したフィールドはデフォルト値のままになります。
+キーは名前で指定します（`a`〜`z` / `0`〜`9` / 記号 / `up`・`down`・`escape`・`delete`・`tab`・`space` / `right_shift`・`right_command` など）。
 
-> JSON 自体はコメント非対応です。上の例の `//` は説明用なので、実ファイルには書かないでください。
+## 仕組み
 
-`src/main.swift` 内のロジック自体を変えたときだけ `sh install.sh` の再実行が必要です。
-
-## 仕組みのメモ
-
-- **Caps Lock** は HID レベルの特殊扱いのため、`CGEventTap` ではなく `hidutil` で Left Control にリマップします（起動時に適用、終了時に復元）。
-- イベントは `CGEventTap`（`cgSessionEventTap`）で購読し、リマップ対象は keyCode を差し替えて出力、マウス操作系は消費して内部エンジンへ渡します。
-- カーソルの連続移動は ~60Hz のタイマーで座標を更新して実現しています。
-- 配列非依存: 文字ではなく **keyCode（仮想キーコード）** で判定するため、JIS の Mac に US 配列キーボードを繋いでも US 側でそのまま動作します。
-
-## 開発
-
-不具合調査時は `src/main.swift` の `remapDebug` を `true` にし、ターミナルから直接起動するとイベントログが見えます:
-
-```sh
-./remap.app/Contents/MacOS/remap
-```
-
-`Ctrl+C` で終了すると Caps Lock も元に戻ります。
-
-> **署名について**: `build.sh` は adhoc 署名にフォールバックします。adhoc 署名は再ビルドのたびに署名ハッシュが変わり、アクセシビリティ権限が外れます。`install.sh` は内部で権限をリセットするので、再ビルド後は許可し直してください。再付与を恒久的に無くしたい場合は、Keychain Access で自己署名コード署名証明書 `remap-signing` を作成すると、`build.sh` が自動でそれを使い権限が維持されます。
+- **Caps Lock** は `CGEventTap` ではなく `hidutil` で Left Control にリマップします。
+- その他のキー入力は `CGEventTap`（`cgSessionEventTap`）で処理します。
+- カーソルの連続移動はタイマーで座標を更新します。
+- 文字ではなく仮想 keyCode で判定するため、キーボード配列に依存しません。
+- `LSUIElement=true` / `.accessory` の通常の AppKit アプリとして常駐します。LaunchAgent の生成・管理はアプリ自身では行いません。
