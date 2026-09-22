@@ -67,7 +67,7 @@ open dist/remap.app
 ローカルの Keychain に code-signing identity `remap-signing` が存在する場合はそれを使って署名し、存在しなければ ad-hoc 署名へフォールバックします。別名を使う場合は `SIGN_IDENTITY` を指定できます。
 
 ```sh
-SIGN_IDENTITY=my-signing ./scripts/build-app.sh
+SIGN_IDENTITY=my-signing bash scripts/build-app.sh
 ```
 
 安定したローカル署名 identity を使うと、同じ Mac 上での再ビルド時に Accessibility 権限を維持しやすくなります。
