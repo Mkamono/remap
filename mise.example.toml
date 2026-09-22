@@ -1,0 +1,12 @@
+[bootstrap.packages."macos-app:remap"]
+version = "0.2.0"
+url = "https://github.com/Mkamono/remap/releases/download/v{{version}}/remap-{{version}}-arm64.zip"
+sha256 = "a4233db8972691af27884bc573a0e0d4f9ca1f62f08337db5d6cce056fc8074d"
+artifact = "remap.app"
+os = "macos/arm64"
+
+# Optional: launch remap automatically at login.
+[bootstrap.macos.launchd.agents.remap]
+program = "/Applications/remap.app/Contents/MacOS/remap"
+run_at_load = true
+process_type = "Interactive"
